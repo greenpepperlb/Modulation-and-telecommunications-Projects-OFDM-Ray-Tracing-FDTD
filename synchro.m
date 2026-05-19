@@ -16,18 +16,19 @@ CP      = 32;           % Cyclic prefix length
 Ng_L    = 18;           % Guard subcarriers left
 Ng_R    = 17;           % Guard subcarriers right
 M       = 16;           % QAM order
-Rsamp   = 12.8e6;       % Sample rate [Hz]
-Novs    = 4;            % Oversampling factor for cross-correlation
+Fs   = 12.8e6;          % Sample rate [Hz]
+Novs    = 4;            % Oversampling factor for cross-correlation,%Guess the peak by a factor 1/Nov
 n_sym   = 10;           % Data OFDM symbols per packet
 
-path_delay = 4;                         % second path delay [OFDM samples]
+path_delay = 2;                         % second path delay [OFDM samples]
 h = zeros(path_delay + 1, 1);
 h(1) = 1;
 h(path_delay + 1) = sqrt(0.5);          % two-path channel
 
-guard_idx = [1:Ng_L, N/2+1, N-Ng_R+1:N];
+guard_idx = [1:Ng_L, N/2+1, N-Ng_R+1:N]; %Guard subcarrier useful for avoid the edges(spectral leakage) 
+% and remove the DC
 active    = setdiff(1:N, guard_idx).';
-Nsc       = length(active);
+      Nsubcarriers = length(active); %This is my Q( for the factor Q/L of the initial noise variance )
 
 bits_per_sym = log2(M);
 plot_floor   = 1e-5;
@@ -40,17 +41,16 @@ H_true_active = H_true(active);
 H_true_active = H_true_active(:);
 
 % Known OFDM preamble, reused by the synchronization algorithms.
-preamble_syms = 2*randi([0 1], Nsc, 1) - 1;   % BPSK, unit power
+preamble_syms = 2*randi([0 1], Nsubcarriers, 1) - 1;   % BPSK, unit power
 preamble_ofdm = ofdm_tx(preamble_syms, N, CP, active);
 
 L     = CP;
-F_N   = fft(eye(N));
-F_sub = F_N(active, 1:L);
+F_N   = fft(eye(N)); %Full FFT matrix 
+F_sub = F_N(active, 1:L); %Only keep frequency bins(476 Bins removing the Subguard and DC
+% that are active and L taps (Columns) ACTIVE)  
 
 %% STEP 1 - Impact of channel estimation error on BER
-fprintf('=== Step 1: Channel estimation error impact ===\n');
-
-err_std_vals = [0 0.02 0.05 0.10];
+err_std_vals = [0 0.02 0.05 0.10]; %Error= h - h^ 
 EbN0_dB_range = 0:2:20;
 BER_est_err  = zeros(length(err_std_vals), length(EbN0_dB_range));
 N_frames = 1500;
@@ -65,25 +65,24 @@ for k = 1:length(err_std_vals)
         total_bits = 0;
 
         for f = 1:N_frames
-            data_tx = randi([0 M-1], Nsc, 1);
+            data_tx = randi([0 M-1], Nsubcarriers, 1);
             syms_tx = qam_mod(data_tx);
 
-            % Slide 25 is an AWGN-channel experiment: the only channel
-            % impairment here is the artificial error on H_hat.
+            % Adding noise 
             noise_var = 1 / (bits_per_sym * ebn0_lin);
             syms_rx = syms_tx + sqrt(noise_var/2) * ...
                 (randn(size(syms_tx)) + 1j*randn(size(syms_tx)));
 
             if err_std == 0
-                H_est = ones(Nsc, 1);
+                H_est = ones(Nsubcarriers, 1);
             else
-                est_err = err_std * (randn(Nsc,1) + 1j*randn(Nsc,1)) / sqrt(2);
+                est_err = err_std * (randn(Nsubcarriers,1) + 1j*randn(Nsubcarriers,1)) / sqrt(2);%Addind noise to the channel
                 H_est = 1 + est_err;
             end
 
             data_rx = qam_demod(syms_rx ./ H_est);
             total_errors = total_errors + biterr(data_tx, data_rx, bits_per_sym);
-            total_bits   = total_bits + Nsc * bits_per_sym;
+            total_bits   = total_bits + Nsubcarriers * bits_per_sym;
         end
 
         BER_est_err(k, i) = total_errors / total_bits;
@@ -114,7 +113,7 @@ export_if_valid(fig1, 'Fig1_Channel_Est_Error.pdf');
 
 %% STEP 2 - OFDM preamble cross-correlation timing on oversampled samples
 fprintf('\n=== Step 2: Oversampled OFDM cross-correlation packet timing ===\n');
-
+%ESTIMATE THE PACKET DELAY 
 preamble_ovs = oversample_signal(preamble_ofdm, Novs);
 timing_path_delays = 1:2:CP;
 timing_snr_range = -30:5:15;
@@ -239,7 +238,7 @@ for s_idx = 1:length(ce_snr_range)
         Yp = ofdm_rx(rx_pr(1:N+CP), N, CP, active);
 
         H_raw = Yp ./ preamble_syms;
-        h_ml = F_sub \ H_raw;
+        h_ml = F_sub \ H_raw; %Stripping the right channel  on the right amount of rows and columns ( acc
         H_den = F_sub * h_ml;
 
         err_raw(t) = mean(abs(H_raw - H_true_active).^2);
@@ -252,8 +251,8 @@ for s_idx = 1:length(ce_snr_range)
         snr_db, 10*log10(MSE_raw(s_idx)), 10*log10(MSE_den(s_idx)));
 end
 
-fprintf('  Average denoising gain: %.1f dB (theory about 10log10(Nsc/L)=%.1f dB)\n', ...
-    mean(10*log10(MSE_raw ./ MSE_den)), 10*log10(Nsc/L));
+fprintf('  Average denoising gain: %.1f dB (theory about 10log10(Nsubcarriers/L)=%.1f dB)\n', ...
+    mean(10*log10(MSE_raw ./ MSE_den)), 10*log10(Nsubcarriers/L));
 
 fig3 = figure('Name','Fig3 - Channel estimation MSE');
 plot(ce_snr_range, 10*log10(MSE_raw), 'r--s', 'LineWidth', 1.7, ...
@@ -332,33 +331,33 @@ for s_idx = 1:length(SNR_range)
     total_bits = 0;
 
     for pkt = 1:n_packets
-        data_tx = randi([0 M-1], Nsc, n_sym);
+        data_tx = randi([0 M-1], Nsubcarriers, n_sym);
         data_syms = qam_mod(data_tx(:));
-        data_syms = reshape(data_syms, Nsc, n_sym);
+        data_syms = reshape(data_syms, Nsubcarriers, n_sym);
 
         tx_packet = preamble_ofdm;
         for m_idx = 1:n_sym
-            tx_packet = [tx_packet; ofdm_tx(data_syms(:,m_idx), N, CP, active)]; %#ok<AGROW>
+            tx_packet = [tx_packet; ofdm_tx(data_syms(:,m_idx), N, CP, active)]; 
         end
 
         rx_clean = filter(h, 1, tx_packet);
         rx_pkt = add_awgn_rx_snr(rx_clean, snr_db);
 
-        t0 = estimate_packet_start(rx_pkt, preamble_ofdm);  % 0-based packet start
+        t0 = estimate_packet_start(rx_pkt, preamble_ofdm);  %ESTIMATION OF PACKET ToA  
         if t0 + N + CP > length(rx_pkt)
             continue;
         end
 
-        rx_pr_blk = rx_pkt(t0 + 1 : t0 + N + CP);
+        rx_pr_blk = rx_pkt(t0 + 1 : t0 + N + CP); %Using that packet time to do the FFT
         Yp = ofdm_rx(rx_pr_blk, N, CP, active);
-        H_raw = Yp ./ preamble_syms;
-
+        H_raw = Yp ./ preamble_syms; % DIvinding by the knowed preamble symbols X to have a raw
+        %H_raw =  H+ W/X
         h_ml = F_sub \ H_raw;
         H_den = F_sub * h_ml;
 
-        data_rx_p = zeros(Nsc, n_sym);
-        data_rx_r = zeros(Nsc, n_sym);
-        data_rx_d = zeros(Nsc, n_sym);
+        data_rx_p = zeros(Nsubcarriers, n_sym);
+        data_rx_r = zeros(Nsubcarriers, n_sym);
+        data_rx_d = zeros(Nsubcarriers, n_sym);
         n_decoded = 0;
 
         data_start = t0 + length(preamble_ofdm);
@@ -475,11 +474,11 @@ function [rmse_samples, bias_samples, hit_rate] = ofdm_toa_stats( ...
     delay_ovs = path_delay * Novs;
     true_start = lead_ovs + 1;
     tx_ovs = [zeros(lead_ovs, 1); preamble_ovs(:); ...
-        zeros(tail_ovs + delay_ovs, 1)];
+        zeros(tail_ovs + delay_ovs, 1)];%Fake Time delay of the packets 
     err_samples = zeros(n_trials, 1);
 
     for t = 1:n_trials
-        second_path_phase = exp(1j * 2*pi*rand);
+        second_path_phase = exp(1j * 2*pi*rand);%Random phase added 
         h_ovs = zeros(delay_ovs + 1, 1);
         h_ovs(1) = 1;
         h_ovs(end) = sqrt(0.5) * second_path_phase;
@@ -502,6 +501,10 @@ function [start_hat, metric] = estimate_packet_start(rx, preamble)
     [~, idx] = max(metric);
     start_hat = idx - 1;  % 0-based offset, easier to compare with inserted zeros
 end
+
+
+
+
 
 function export_if_valid(fig, filename)
     drawnow;
